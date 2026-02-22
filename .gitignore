@@ -1,0 +1,17 @@
+# Configuração local
+.env
+
+# Apps gerados (local da VM)
+data/apps/*.json
+
+# Logs
+*.log
+
+# Temporários
+*.tmp
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db

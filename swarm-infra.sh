@@ -1,0 +1,591 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Swarm Infra - Command Line Interface (Linux only)
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+ENV_FILE="$SCRIPT_DIR/.env"
+ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
+STACK_NAME_DEFAULT="swarm-infra"
+DATA_DIR="$SCRIPT_DIR/data"
+APPS_DIR="$DATA_DIR/apps"
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+log_info() { echo "[INFO] $*"; }
+log_warn() { echo "[WARN] $*"; }
+log_error() { echo "[ERROR] $*" >&2; }
+log_success() { echo "[OK] $*"; }
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+require_linux() {
+    if [ "$(uname -s)" != "Linux" ]; then
+        log_error "Este comando suporta apenas Linux."
+        exit 1
+    fi
+}
+
+require_command() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        return 1
+    fi
+    return 0
+}
+
+ensure_dirs() {
+    mkdir -p "$APPS_DIR"
+}
+
+sanitize_slug() {
+    echo "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//'
+}
+
+json_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+ask_yes_no() {
+    local prompt="$1"
+    local default="$2"
+    local answer
+    while true; do
+        read -r -p "$prompt" answer
+        if [ -z "$answer" ]; then
+            answer="$default"
+        fi
+        case "$answer" in
+            y|Y|yes|YES) echo "yes"; return 0 ;;
+            n|N|no|NO) echo "no"; return 0 ;;
+            *) echo "Digite yes ou no." ;;
+        esac
+    done
+}
+
+
+
+set_env_var() {
+    local key="$1"
+    local value="$2"
+
+    if [ -f "$ENV_FILE" ] && grep -q "^${key}=" "$ENV_FILE"; then
+        sed -i "s|^${key}=.*|${key}=${value}|g" "$ENV_FILE"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
+
+load_env() {
+    if [ -f "$ENV_FILE" ]; then
+        set -a
+        # shellcheck disable=SC1090
+        source "$ENV_FILE"
+        set +a
+    fi
+}
+
+
+
+ensure_swarm_active() {
+    if docker info 2>/dev/null | grep -q "Swarm: active"; then
+        return 0
+    fi
+
+    log_warn "Docker Swarm nao esta ativo. Inicializando..."
+
+    # Tentar sem advertise-addr primeiro
+    if docker swarm init 2>/dev/null; then
+        log_success "Swarm inicializado"
+        return 0
+    fi
+
+    # Se falhar por já estar em um Swarm, deixar e reiniciar
+    if docker swarm leave --force 2>/dev/null; then
+        log_warn "Deixando Swarm anterior..."
+    fi
+
+    # Se falhar, tentar com advertise-addr detectado automaticamente
+    local advertise_ip
+    advertise_ip=$(hostname -I | awk '{print $1}')
+    
+    if [ -z "$advertise_ip" ]; then
+        log_error "Nao foi possivel detectar o endereco IP da VM"
+        log_error "Use manualmente: docker swarm init --advertise-addr <SEU_IP>"
+        exit 1
+    fi
+
+    log_warn "Tentando com advertise-addr: $advertise_ip"
+    if ! docker swarm init --advertise-addr "$advertise_ip" 2>/dev/null; then
+        log_error "Falha ao iniciar o Swarm com advertise-addr: $advertise_ip"
+        exit 1
+    fi
+
+    log_success "Swarm inicializado com advertise-addr: $advertise_ip"
+}
+
+ensure_env_configured() {
+    if [ ! -f "$ENV_FILE" ]; then
+        if [ -f "$ENV_EXAMPLE" ]; then
+            cp "$ENV_EXAMPLE" "$ENV_FILE"
+            log_info "Arquivo .env criado a partir de .env.example"
+        else
+            log_error "Arquivo .env.example nao encontrado."
+            exit 1
+        fi
+    fi
+
+    load_env
+
+    if [ -z "${DOMAIN:-}" ]; then
+        read -r -p "Dominio base (ex: exemplo.com): " DOMAIN
+        set_env_var "DOMAIN" "${DOMAIN}"
+    fi
+
+    if [ -z "${LETSENCRYPT_EMAIL:-}" ]; then
+        read -r -p "Email para Let's Encrypt: " LETSENCRYPT_EMAIL
+        set_env_var "LETSENCRYPT_EMAIL" "${LETSENCRYPT_EMAIL}"
+    fi
+
+    if [ -z "${TRAEFIK_AUTH:-}" ]; then
+        local traefik_password traefik_hash
+        
+        while true; do
+            read -r -sp "Senha do Traefik: " traefik_password
+            echo ""
+            
+            if [ -z "${traefik_password}" ]; then
+                log_warn "Senha do Traefik nao pode estar vazia. Tente novamente (ou pressione Ctrl+C para cancelar)"
+                continue
+            fi
+            break
+        done
+        
+        if ! command -v htpasswd >/dev/null 2>&1; then
+            log_error "htpasswd nao esta instalado. Execute: apt-get install apache2-utils"
+            exit 1
+        fi
+        
+        traefik_hash=$(htpasswd -nbB admin "${traefik_password}" | sed 's/\$/\$\$/g')
+        set_env_var "TRAEFIK_AUTH" "'${traefik_hash}'"
+    fi
+
+    if [ -z "${PORTAINER_ADMIN_PASSWORD:-}" ]; then
+        local portainer_password portainer_hash
+        
+        while true; do
+            read -r -sp "Senha do Portainer: " portainer_password
+            echo ""
+            
+            if [ -z "${portainer_password}" ]; then
+                log_warn "Senha do Portainer nao pode estar vazia. Tente novamente (ou pressione Ctrl+C para cancelar)"
+                continue
+            fi
+            break
+        done
+        
+        if ! command -v htpasswd >/dev/null 2>&1; then
+            log_error "htpasswd nao esta instalado. Execute: apt-get install apache2-utils"
+            exit 1
+        fi
+        
+        portainer_hash=$(htpasswd -nbB admin "${portainer_password}" | cut -d ":" -f 2)
+        set_env_var "PORTAINER_ADMIN_PASSWORD" "'${portainer_hash}'"
+    fi
+
+    load_env
+}
+
+stack_name() {
+    load_env
+    echo "${STACK_NAME:-$STACK_NAME_DEFAULT}"
+}
+
+# -----------------------------------------------------------------------------
+# Commands
+# -----------------------------------------------------------------------------
+cmd_init() {
+    require_linux
+
+    ensure_swarm_active
+    ensure_env_configured
+    ensure_dirs
+    load_env
+
+    local name
+    name="$(stack_name)"
+
+    log_info "Verificando rede traefik_public..."
+    if ! docker network ls | grep -q "traefik_public"; then
+        docker network create --driver overlay --attachable traefik_public
+        log_success "Rede criada"
+    else
+        log_info "Rede traefik_public ja existe"
+    fi
+
+    log_info "Fazendo deploy da stack: $name"
+    docker stack deploy -c docker-compose.yml --with-registry-auth "$name"
+
+    log_success "Stack inicializada"
+}
+
+cmd_start() {
+    require_linux
+
+    ensure_swarm_active
+
+    if [ ! -f "$ENV_FILE" ]; then
+        log_error "Arquivo .env nao encontrado. Execute: ./swarm-infra.sh init"
+        exit 1
+    fi
+
+    ensure_dirs
+    load_env
+
+    local name
+    name="$(stack_name)"
+
+    log_info "Iniciando stack: $name"
+    docker stack deploy -c docker-compose.yml --with-registry-auth "$name"
+    log_success "Stack iniciada"
+}
+
+cmd_stop() {
+    require_linux
+
+    local name
+    name="$(stack_name)"
+
+    if ! docker stack ls | grep -q "${name}"; then
+        log_warn "Stack $name nao encontrada"
+        return 0
+    fi
+
+    if [ "${1:-}" != "--force" ]; then
+        local confirm
+        confirm="$(ask_yes_no "Confirma parar a stack $name? (yes/no): " "no")"
+        if [ "$confirm" != "yes" ]; then
+            log_info "Operacao cancelada"
+            return 0
+        fi
+    fi
+
+    log_info "Parando stack $name..."
+    docker stack rm "$name"
+    log_success "Stack parada"
+}
+
+cmd_restart() {
+    require_linux
+
+    local confirm
+    confirm="$(ask_yes_no "Confirma reiniciar a stack? (yes/no): " "no")"
+    if [ "$confirm" != "yes" ]; then
+        log_info "Operacao cancelada"
+        return 0
+    fi
+
+    cmd_stop --force
+    cmd_start
+}
+
+cmd_cleanup() {
+    require_linux
+
+    local name
+    name="$(stack_name)"
+
+    log_warn "⚠️  ATENÇÃO: Este comando vai APAGAR TUDO:"
+    log_warn "   - Stack: $name"
+    log_warn "   - Volumes: portainer_data, traefik_letsencrypt"
+    log_warn "   - Arquivo .env"
+    log_warn "   - Apps configurados"
+    
+    local confirm
+    confirm="$(ask_yes_no "Deseja continuar? (yes/no): " "no")"
+    if [ "$confirm" != "yes" ]; then
+        log_info "Operacao cancelada"
+        return 0
+    fi
+
+    # Parar a stack
+    if docker stack ls | grep -q "${name}"; then
+        log_info "Removendo stack: $name"
+        docker stack rm "$name" || true
+        sleep 3  # Aguardar remoção dos serviços
+    fi
+
+    # Remover volumes
+    log_info "Removendo volumes..."
+    docker volume rm "${name}_portainer_data" 2>/dev/null || log_warn "Volume portainer_data não encontrado"
+    docker volume rm "${name}_traefik_letsencrypt" 2>/dev/null || log_warn "Volume traefik_letsencrypt não encontrado"
+
+    # Remover arquivo .env
+    if [ -f "$ENV_FILE" ]; then
+        log_info "Removendo arquivo .env"
+        rm -f "$ENV_FILE"
+    fi
+
+    # Remover apps configurados
+    if [ -d "$APPS_DIR" ]; then
+        log_info "Removendo apps configurados"
+        rm -rf "$APPS_DIR"
+    fi
+
+    log_success "Cleanup completo! Execute 'init' para recomeçar do zero."
+}
+
+print_labels() {
+    local service_name="$1"
+    local router_name="$2"
+    local full_domain="$3"
+    local port="$4"
+    local path_prefix="$5"
+    local https_only="$6"
+    local strip_prefix="$7"
+
+    local labels
+
+    labels="        - traefik.enable=true
+        - traefik.docker.network=traefik_public
+        - traefik.http.routers.${router_name}.rule=Host(\`${full_domain}\`)"
+
+    if [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
+        labels+=" && PathPrefix(\`${path_prefix}\`)"
+    fi
+
+    labels+="
+        - traefik.http.routers.${router_name}.entrypoints=websecure
+        - traefik.http.routers.${router_name}.tls=true
+        - traefik.http.routers.${router_name}.tls.certresolver=letsencrypt"
+
+    if [ "$strip_prefix" = "true" ] && [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
+        labels+="
+        - traefik.http.routers.${router_name}.middlewares=${service_name}-stripprefix
+        - traefik.http.middlewares.${service_name}-stripprefix.stripprefix.prefixes=${path_prefix}"
+    fi
+
+    labels+="
+        - traefik.http.services.${service_name}.loadbalancer.server.port=${port}"
+
+    if [ "$https_only" = "true" ]; then
+        labels+="
+        - traefik.http.routers.${router_name}-http.rule=Host(\`${full_domain}\`)"
+        if [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
+            labels+=" && PathPrefix(\`${path_prefix}\`)"
+        fi
+        labels+="
+        - traefik.http.routers.${router_name}-http.entrypoints=web
+        - traefik.http.routers.${router_name}-http.middlewares=${service_name}-redirect
+        - traefik.http.middlewares.${service_name}-redirect.redirectscheme.scheme=https
+        - traefik.http.middlewares.${service_name}-redirect.redirectscheme.permanent=true"
+    fi
+
+    echo "$labels"
+}
+
+cmd_add_app() {
+    require_linux
+    ensure_dirs
+    load_env
+
+    local app_name_raw app_name base_domain
+    local service_count
+
+    read -r -p "Nome do app (ex: app1): " app_name_raw
+    app_name="$(sanitize_slug "$app_name_raw")"
+
+    if [ -z "$app_name" ]; then
+        log_error "Nome do app invalido"
+        exit 1
+    fi
+
+    base_domain="${DOMAIN:-}"
+    if [ -z "$base_domain" ]; then
+        read -r -p "Dominio base (ex: exemplo.com): " base_domain
+    else
+        read -r -p "Dominio base [${base_domain}]: " base_domain_input
+        if [ -n "$base_domain_input" ]; then
+            base_domain="$base_domain_input"
+        fi
+    fi
+
+    read -r -p "Quantidade de servicos: " service_count
+    if ! [[ "$service_count" =~ ^[0-9]+$ ]] || [ "$service_count" -lt 1 ]; then
+        log_error "Quantidade invalida"
+        exit 1
+    fi
+
+    local app_file
+    app_file="$APPS_DIR/${app_name}.json"
+
+    if [ -f "$app_file" ]; then
+        log_error "App ja existe: $app_name"
+        exit 1
+    fi
+
+    local services_json=""
+    local i
+
+    for (( i=1; i<=service_count; i++ )); do
+        local service_key_raw service_key
+        local default_subdomain subdomain subdomain_input
+        local port path_prefix strip_prefix https_only
+
+        read -r -p "Servico #$i (ex: api, frontend, postgres): " service_key_raw
+        service_key="$(sanitize_slug "$service_key_raw")"
+
+        if [ -z "$service_key" ]; then
+            log_error "Nome do servico invalido"
+            exit 1
+        fi
+
+        case "$service_key" in
+            front|frontend|web|app|main)
+                default_subdomain="$app_name"
+                ;;
+            *)
+                default_subdomain="${app_name}-${service_key}"
+                ;;
+        esac
+
+        read -r -p "Subdominio [${default_subdomain}]: " subdomain_input
+        if [ -n "$subdomain_input" ]; then
+            subdomain="$(sanitize_slug "$subdomain_input")"
+        else
+            subdomain="$default_subdomain"
+        fi
+
+        read -r -p "Porta interna: " port
+        if [ -z "$port" ]; then
+            log_error "Porta e obrigatoria"
+            exit 1
+        fi
+
+        read -r -p "Path prefix (opcional, ex: /api): " path_prefix
+        if [ -z "$path_prefix" ]; then
+            path_prefix="none"
+        fi
+
+        strip_prefix="false"
+        if [ "$path_prefix" != "none" ]; then
+            strip_prefix="$(ask_yes_no "Remover prefixo no backend? (yes/no): " "no")"
+        fi
+
+        https_only="$(ask_yes_no "Forcar HTTPS? (yes/no): " "yes")"
+
+        local service_name router_name full_domain
+        service_name="${app_name}-${service_key}"
+        router_name="${service_name}-router"
+        full_domain="${subdomain}.${base_domain}"
+
+        local labels
+        labels="$(print_labels "$service_name" "$router_name" "$full_domain" "$port" "$path_prefix" "$https_only" "$strip_prefix")"
+
+        local labels_json
+        labels_json="$(printf '%s' "$labels" | jq -R -s -c 'split("\n")')"
+
+        local service_json
+        service_json="{\n"
+        service_json+="  \"name\": \"$(json_escape "$service_name")\",\n"
+        service_json+="  \"key\": \"$(json_escape "$service_key")\",\n"
+        service_json+="  \"subdomain\": \"$(json_escape "$subdomain")\",\n"
+        service_json+="  \"domain\": \"$(json_escape "$base_domain")\",\n"
+        service_json+="  \"full_url\": \"https://$(json_escape "$full_domain")\",\n"
+        service_json+="  \"port\": \"$(json_escape "$port")\",\n"
+        service_json+="  \"path_prefix\": \"$(json_escape "$path_prefix")\",\n"
+        service_json+="  \"https_only\": \"$(json_escape "$https_only")\",\n"
+        service_json+="  \"strip_prefix\": \"$(json_escape "$strip_prefix")\",\n"
+        service_json+="  \"labels\": ${labels_json}\n"
+        service_json+="}"
+
+        if [ -n "$services_json" ]; then
+            services_json+=" ,"
+        fi
+        services_json+="$service_json"
+
+        echo ""
+        log_info "Labels para $service_name ($full_domain):"
+        echo "$labels"
+    done
+
+    local now
+    now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+    cat > "$app_file" <<EOF
+{
+  "app": "$(json_escape "$app_name")",
+  "domain": "$(json_escape "$base_domain")",
+  "created_at": "${now}",
+  "services": [${services_json}
+  ]
+}
+EOF
+
+    log_success "App salvo em: $app_file"
+}
+
+cmd_remove_app() {
+    require_linux
+    ensure_dirs
+
+    local app_name_raw app_name app_file
+
+    read -r -p "Nome do app para remover: " app_name_raw
+    app_name="$(sanitize_slug "$app_name_raw")"
+    app_file="$APPS_DIR/${app_name}.json"
+
+    if [ ! -f "$app_file" ]; then
+        log_error "App nao encontrado: $app_name"
+        exit 1
+    fi
+
+    local confirm
+    confirm="$(ask_yes_no "Confirma remover o app $app_name? (yes/no): " "no")"
+    if [ "$confirm" != "yes" ]; then
+        log_info "Operacao cancelada"
+        return 0
+    fi
+
+    rm -f "$app_file"
+    log_success "App removido"
+}
+
+cmd_help() {
+    cat <<EOF
+Uso: ./swarm-infra.sh <comando>
+
+Comandos:
+  init        Inicializa Traefik + Portainer (primeira vez)
+  start       Inicia a stack swarm-infra
+  stop        Para a stack swarm-infra
+  restart     Reinicia a stack swarm-infra
+  cleanup     ⚠️  Remove TUDO (stack, volumes, .env, apps) e recomeça do zero
+  add-app     Cria configuracao JSON de um app e gera labels Traefik
+  remove-app  Remove a configuracao JSON de um app
+EOF
+}
+
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
+case "${1:-}" in
+    init) cmd_init ;;
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    restart) cmd_restart ;;
+    cleanup) cmd_cleanup ;;
+    add-app) cmd_add_app ;;
+    remove-app) cmd_remove_app ;;
+    help|--help|-h|"") cmd_help ;;
+    *)
+        log_error "Comando desconhecido: $1"
+        cmd_help
+        exit 1
+        ;;
+ esac
