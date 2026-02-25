@@ -40,7 +40,7 @@ require_command() {
 }
 
 ensure_dirs() {
-    mkdir -p "$APPS_DIR"
+    : # Diretório de apps não mais necessário
 }
 
 sanitize_slug() {
@@ -304,7 +304,6 @@ cmd_cleanup() {
     log_warn "   - Stack: $name"
     log_warn "   - Volumes: portainer_data, traefik_letsencrypt"
     log_warn "   - Arquivo .env"
-    log_warn "   - Apps configurados"
     
     local confirm
     confirm="$(ask_yes_no "Deseja continuar? (yes/no): " "no")"
@@ -331,229 +330,7 @@ cmd_cleanup() {
         rm -f "$ENV_FILE"
     fi
 
-    # Remover apps configurados
-    if [ -d "$APPS_DIR" ]; then
-        log_info "Removendo apps configurados"
-        rm -rf "$APPS_DIR"
-    fi
-
     log_success "Cleanup completo! Execute 'init' para recomeçar do zero."
-}
-
-print_labels() {
-    local service_name="$1"
-    local router_name="$2"
-    local full_domain="$3"
-    local port="$4"
-    local path_prefix="$5"
-    local https_only="$6"
-    local strip_prefix="$7"
-
-    local labels
-
-    labels="        - traefik.enable=true
-        - traefik.docker.network=traefik_public
-        - traefik.http.routers.${router_name}.rule=Host(\`${full_domain}\`)"
-
-    if [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
-        labels+=" && PathPrefix(\`${path_prefix}\`)"
-    fi
-
-    labels+="
-        - traefik.http.routers.${router_name}.entrypoints=websecure
-        - traefik.http.routers.${router_name}.tls=true
-        - traefik.http.routers.${router_name}.tls.certresolver=letsencrypt"
-
-    if [ "$strip_prefix" = "true" ] && [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
-        labels+="
-        - traefik.http.routers.${router_name}.middlewares=${service_name}-stripprefix
-        - traefik.http.middlewares.${service_name}-stripprefix.stripprefix.prefixes=${path_prefix}"
-    fi
-
-    labels+="
-        - traefik.http.services.${service_name}.loadbalancer.server.port=${port}"
-
-    if [ "$https_only" = "true" ]; then
-        labels+="
-        - traefik.http.routers.${router_name}-http.rule=Host(\`${full_domain}\`)"
-        if [ -n "$path_prefix" ] && [ "$path_prefix" != "none" ]; then
-            labels+=" && PathPrefix(\`${path_prefix}\`)"
-        fi
-        labels+="
-        - traefik.http.routers.${router_name}-http.entrypoints=web
-        - traefik.http.routers.${router_name}-http.middlewares=${service_name}-redirect
-        - traefik.http.middlewares.${service_name}-redirect.redirectscheme.scheme=https
-        - traefik.http.middlewares.${service_name}-redirect.redirectscheme.permanent=true"
-    fi
-
-    echo "$labels"
-}
-
-cmd_add_app() {
-    require_linux
-    ensure_dirs
-    load_env
-
-    local app_name_raw app_name base_domain
-    local service_count
-
-    read -r -p "Nome do app (ex: app1): " app_name_raw
-    app_name="$(sanitize_slug "$app_name_raw")"
-
-    if [ -z "$app_name" ]; then
-        log_error "Nome do app invalido"
-        exit 1
-    fi
-
-    base_domain="${DOMAIN:-}"
-    if [ -z "$base_domain" ]; then
-        read -r -p "Dominio base (ex: exemplo.com): " base_domain
-    else
-        read -r -p "Dominio base [${base_domain}]: " base_domain_input
-        if [ -n "$base_domain_input" ]; then
-            base_domain="$base_domain_input"
-        fi
-    fi
-
-    read -r -p "Quantidade de servicos: " service_count
-    if ! [[ "$service_count" =~ ^[0-9]+$ ]] || [ "$service_count" -lt 1 ]; then
-        log_error "Quantidade invalida"
-        exit 1
-    fi
-
-    local app_file
-    app_file="$APPS_DIR/${app_name}.json"
-
-    if [ -f "$app_file" ]; then
-        log_error "App ja existe: $app_name"
-        exit 1
-    fi
-
-    local services_json=""
-    local i
-
-    for (( i=1; i<=service_count; i++ )); do
-        local service_key_raw service_key
-        local default_subdomain subdomain subdomain_input
-        local port path_prefix strip_prefix https_only
-
-        read -r -p "Servico #$i (ex: api, frontend, postgres): " service_key_raw
-        service_key="$(sanitize_slug "$service_key_raw")"
-
-        if [ -z "$service_key" ]; then
-            log_error "Nome do servico invalido"
-            exit 1
-        fi
-
-        case "$service_key" in
-            front|frontend|web|app|main)
-                default_subdomain="$app_name"
-                ;;
-            *)
-                default_subdomain="${app_name}-${service_key}"
-                ;;
-        esac
-
-        read -r -p "Subdominio [${default_subdomain}]: " subdomain_input
-        if [ -n "$subdomain_input" ]; then
-            subdomain="$(sanitize_slug "$subdomain_input")"
-        else
-            subdomain="$default_subdomain"
-        fi
-
-        read -r -p "Porta interna: " port
-        if [ -z "$port" ]; then
-            log_error "Porta e obrigatoria"
-            exit 1
-        fi
-
-        read -r -p "Path prefix (opcional, ex: /api): " path_prefix
-        if [ -z "$path_prefix" ]; then
-            path_prefix="none"
-        fi
-
-        strip_prefix="false"
-        if [ "$path_prefix" != "none" ]; then
-            strip_prefix="$(ask_yes_no "Remover prefixo no backend? (yes/no): " "no")"
-        fi
-
-        https_only="$(ask_yes_no "Forcar HTTPS? (yes/no): " "yes")"
-
-        local service_name router_name full_domain
-        service_name="${app_name}-${service_key}"
-        router_name="${service_name}-router"
-        full_domain="${subdomain}.${base_domain}"
-
-        local labels
-        labels="$(print_labels "$service_name" "$router_name" "$full_domain" "$port" "$path_prefix" "$https_only" "$strip_prefix")"
-
-        local labels_json
-        labels_json="$(printf '%s' "$labels" | jq -R -s -c 'split("\n")')"
-
-        local service_json
-        service_json="{\n"
-        service_json+="  \"name\": \"$(json_escape "$service_name")\",\n"
-        service_json+="  \"key\": \"$(json_escape "$service_key")\",\n"
-        service_json+="  \"subdomain\": \"$(json_escape "$subdomain")\",\n"
-        service_json+="  \"domain\": \"$(json_escape "$base_domain")\",\n"
-        service_json+="  \"full_url\": \"https://$(json_escape "$full_domain")\",\n"
-        service_json+="  \"port\": \"$(json_escape "$port")\",\n"
-        service_json+="  \"path_prefix\": \"$(json_escape "$path_prefix")\",\n"
-        service_json+="  \"https_only\": \"$(json_escape "$https_only")\",\n"
-        service_json+="  \"strip_prefix\": \"$(json_escape "$strip_prefix")\",\n"
-        service_json+="  \"labels\": ${labels_json}\n"
-        service_json+="}"
-
-        if [ -n "$services_json" ]; then
-            services_json+=" ,"
-        fi
-        services_json+="$service_json"
-
-        echo ""
-        log_info "Labels para $service_name ($full_domain):"
-        echo "$labels"
-    done
-
-    local now
-    now="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-
-    cat > "$app_file" <<EOF
-{
-  "app": "$(json_escape "$app_name")",
-  "domain": "$(json_escape "$base_domain")",
-  "created_at": "${now}",
-  "services": [${services_json}
-  ]
-}
-EOF
-
-    log_success "App salvo em: $app_file"
-}
-
-cmd_remove_app() {
-    require_linux
-    ensure_dirs
-
-    local app_name_raw app_name app_file
-
-    read -r -p "Nome do app para remover: " app_name_raw
-    app_name="$(sanitize_slug "$app_name_raw")"
-    app_file="$APPS_DIR/${app_name}.json"
-
-    if [ ! -f "$app_file" ]; then
-        log_error "App nao encontrado: $app_name"
-        exit 1
-    fi
-
-    local confirm
-    confirm="$(ask_yes_no "Confirma remover o app $app_name? (yes/no): " "no")"
-    if [ "$confirm" != "yes" ]; then
-        log_info "Operacao cancelada"
-        return 0
-    fi
-
-    rm -f "$app_file"
-    log_success "App removido"
 }
 
 cmd_help() {
@@ -565,9 +342,7 @@ Comandos:
   start       Inicia a stack swarm-infra
   stop        Para a stack swarm-infra
   restart     Reinicia a stack swarm-infra
-  cleanup     ⚠️  Remove TUDO (stack, volumes, .env, apps) e recomeça do zero
-  add-app     Cria configuracao JSON de um app e gera labels Traefik
-  remove-app  Remove a configuracao JSON de um app
+  cleanup     ⚠️  Remove TUDO (stack, volumes, .env) e recomeça do zero
 EOF
 }
 
@@ -580,8 +355,6 @@ case "${1:-}" in
     stop) cmd_stop ;;
     restart) cmd_restart ;;
     cleanup) cmd_cleanup ;;
-    add-app) cmd_add_app ;;
-    remove-app) cmd_remove_app ;;
     help|--help|-h|"") cmd_help ;;
     *)
         log_error "Comando desconhecido: $1"
