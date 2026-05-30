@@ -212,6 +212,11 @@ stack_name() {
 cmd_setup() {
     require_linux
 
+    if command -v docker >/dev/null 2>&1; then
+        log_info "O Docker ja esta instalado no sistema."
+        return 0
+    fi
+
     log_info "Iniciando a instalacao automatizada do Docker..."
 
     # Remover configuracoes antigas/corrompidas do Docker antes do apt-get update
