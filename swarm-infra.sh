@@ -209,6 +209,72 @@ stack_name() {
 # -----------------------------------------------------------------------------
 # Commands
 # -----------------------------------------------------------------------------
+cmd_setup() {
+    require_linux
+
+    log_info "Iniciando a instalacao automatizada do Docker..."
+
+    # Remover configuracoes antigas/corrompidas do Docker antes do apt-get update
+    log_info "Limpando configuracoes de repositorios antigos do Docker..."
+    sudo rm -f /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/docker.sources
+
+    # 1. Atualizar e instalar dependencias basicas
+    log_info "Atualizando pacotes e instalando dependencias basicas (ca-certificates, curl, gnupg)..."
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl gnupg
+
+    # 2. Configurar a chave GPG do Docker
+    log_info "Configurando chave GPG oficial do Docker..."
+    sudo install -m 0755 -d /etc/apt/keyrings
+    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+    sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+    # 3. Configurar repositorio do Docker
+    log_info "Configurando repositorio do Docker..."
+    local suite
+    suite=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+    sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: ${suite}
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+    # 4. Atualizar os repositorios do apt e instalar o Docker
+    log_info "Atualizando repositorios com o novo source do Docker..."
+    sudo apt-get update
+
+    log_info "Instalando Docker Engine, CLI, Containerd e plugins..."
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    # 5. Iniciar e habilitar o servico do Docker
+    log_info "Habilitando e iniciando servico do Docker..."
+    sudo systemctl start docker
+    sudo systemctl enable docker
+
+    # 6. Instalar dependencias para geracao de Hash (apache2-utils)
+    log_info "Instalando dependencias de Hash (apache2-utils)..."
+    sudo apt-get install -y apache2-utils
+
+    # 7. Verificar a instalacao
+    if command -v docker >/dev/null 2>&1; then
+        log_success "Docker instalado com sucesso!"
+        docker --version
+    else
+        log_error "Erro: Docker nao foi encontrado apos a instalacao."
+        exit 1
+    fi
+
+    if command -v htpasswd >/dev/null 2>&1; then
+        log_success "apache2-utils (htpasswd) instalado com sucesso!"
+    else
+        log_warn "Aviso: htpasswd nao foi encontrado no PATH."
+    fi
+
+    log_success "Setup concluido com sucesso! Agora voce pode rodar './swarm-infra.sh init'"
+}
+
 cmd_init() {
     require_linux
 
@@ -338,6 +404,7 @@ cmd_help() {
 Uso: ./swarm-infra.sh <comando>
 
 Comandos:
+  setup       Instala o Docker, Docker Compose e dependencias (apache2-utils) no servidor atual
   init        Inicializa Traefik + Portainer (primeira vez)
   start       Inicia a stack swarm-infra
   stop        Para a stack swarm-infra
@@ -350,6 +417,7 @@ EOF
 # Entrypoint
 # -----------------------------------------------------------------------------
 case "${1:-}" in
+    setup) cmd_setup ;;
     init) cmd_init ;;
     start) cmd_start ;;
     stop) cmd_stop ;;
