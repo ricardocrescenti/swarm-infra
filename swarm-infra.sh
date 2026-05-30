@@ -129,79 +129,91 @@ ensure_swarm_active() {
     log_success "Swarm inicializado com advertise-addr: $advertise_ip"
 }
 
+configure_env_interactive() {
+    if [ ! -f "$ENV_EXAMPLE" ]; then
+        log_error "Arquivo .env.example nao encontrado."
+        exit 1
+    fi
+
+    # Validar htpasswd antes de solicitar senhas
+    if ! command -v htpasswd > /dev/null 2>&1; then
+        log_error "O utilitario 'htpasswd' nao esta instalado."
+        log_error "Por favor, execute primeiro: ./swarm-infra.sh setup"
+        log_error "Ou instale manualmente: sudo apt-get install -y apache2-utils"
+        exit 1
+    fi
+
+    local input_domain=""
+    local input_email=""
+    local traefik_password=""
+    local portainer_password=""
+
+    # 1. Solicitar DOMAIN
+    while [ -z "$input_domain" ]; do
+        read -r -p "Digite o Dominio base (ex: exemplo.com): " input_domain
+        if [ -z "$input_domain" ]; then
+            log_warn "O dominio nao pode ser vazio."
+        fi
+    done
+
+    # 2. Solicitar LETSENCRYPT_EMAIL
+    while [ -z "$input_email" ]; do
+        read -r -p "Digite o Email para Let's Encrypt (ex: seu@email.com): " input_email
+        if [ -z "$input_email" ]; then
+            log_warn "O email nao pode ser vazio."
+        fi
+    done
+
+    # 3. Solicitar Senha do Traefik
+    while [ -z "$traefik_password" ]; do
+        read -r -p "Digite a senha para o Painel do Traefik (usuario: admin): " traefik_password
+        if [ -z "$traefik_password" ]; then
+            log_warn "A senha do Traefik nao pode ser vazia."
+        fi
+    done
+
+    # 4. Solicitar Senha do Portainer
+    while [ -z "$portainer_password" ]; do
+        read -r -p "Digite a senha para o Admin do Portainer (usuario: admin): " portainer_password
+        if [ -z "$portainer_password" ]; then
+            log_warn "A senha do Portainer nao pode ser vazia."
+        fi
+    done
+
+    # Copiar arquivo base
+    cp "$ENV_EXAMPLE" "$ENV_FILE"
+    log_info "Arquivo .env criado com sucesso!"
+
+    # Gerar hashes
+    local traefik_hash portainer_hash
+    traefik_hash=$(htpasswd -nb admin "${traefik_password}")
+    portainer_hash=$(htpasswd -nbB admin "${portainer_password}" | cut -d ":" -f 2)
+
+    # Aplicar no .env
+    set_env_var "DOMAIN" "${input_domain}"
+    set_env_var "LETSENCRYPT_EMAIL" "${input_email}"
+    set_env_var "TRAEFIK_AUTH" "'${traefik_hash}'"
+    set_env_var "PORTAINER_ADMIN_PASSWORD" "'${portainer_hash}'"
+
+    log_success "Arquivo .env configurado com sucesso!"
+}
+
 ensure_env_configured() {
     if [ ! -f "$ENV_FILE" ]; then
         log_info "Arquivo .env nao encontrado. Iniciando configuracao..."
-
-        if [ ! -f "$ENV_EXAMPLE" ]; then
-            log_error "Arquivo .env.example nao encontrado."
-            exit 1
+        configure_env_interactive
+    else
+        local recreate
+        recreate="$(ask_yes_no "Arquivo .env ja existe. Deseja recriar? (yes/no): " "no")"
+        if [ "$recreate" = "yes" ]; then
+            log_info "Recriando arquivo .env..."
+            rm -f "$ENV_FILE"
+            configure_env_interactive
+        else
+            log_info "Usando arquivo .env existente."
         fi
-
-        # Validar htpasswd antes de solicitar senhas
-        if ! command -v htpasswd >/dev/null 2>&1; then
-            log_error "O utilitario 'htpasswd' nao esta instalado."
-            log_error "Por favor, execute primeiro: ./swarm-infra.sh setup"
-            log_error "Ou instale manualmente: sudo apt-get install -y apache2-utils"
-            exit 1
-        fi
-
-        local input_domain=""
-        local input_email=""
-        local traefik_password=""
-        local portainer_password=""
-
-        # 1. Solicitar DOMAIN
-        while [ -z "$input_domain" ]; do
-            read -r -p "Digite o Dominio base (ex: exemplo.com): " input_domain
-            if [ -z "$input_domain" ]; then
-                log_warn "O dominio nao pode ser vazio."
-            fi
-        done
-
-        # 2. Solicitar LETSENCRYPT_EMAIL
-        while [ -z "$input_email" ]; do
-            read -r -p "Digite o Email para Let's Encrypt (ex: seu@email.com): " input_email
-            if [ -z "$input_email" ]; then
-                log_warn "O email nao pode ser vazio."
-            fi
-        done
-
-        # 3. Solicitar Senha do Traefik
-        while [ -z "$traefik_password" ]; do
-            read -r -p "Digite a senha para o Painel do Traefik (usuario: admin): " traefik_password
-            if [ -z "$traefik_password" ]; then
-                log_warn "A senha do Traefik nao pode ser vazia."
-            fi
-        done
-
-        # 4. Solicitar Senha do Portainer
-        while [ -z "$portainer_password" ]; do
-            read -r -p "Digite a senha para o Admin do Portainer (usuario: admin): " portainer_password
-            if [ -z "$portainer_password" ]; then
-                log_warn "A senha do Portainer nao pode ser vazia."
-            fi
-        done
-
-        # Copiar arquivo base
-        cp "$ENV_EXAMPLE" "$ENV_FILE"
-        log_info "Arquivo .env criado com sucesso!"
-
-        # Gerar hashes
-        local traefik_hash portainer_hash
-        traefik_hash=$(htpasswd -nb admin "${traefik_password}")
-        portainer_hash=$(htpasswd -nbB admin "${portainer_password}" | cut -d ":" -f 2)
-
-        # Aplicar no .env
-        set_env_var "DOMAIN" "${input_domain}"
-        set_env_var "LETSENCRYPT_EMAIL" "${input_email}"
-        set_env_var "TRAEFIK_AUTH" "'${traefik_hash}'"
-        set_env_var "PORTAINER_ADMIN_PASSWORD" "'${portainer_hash}'"
-
-        log_success "Arquivo .env configurado com sucesso!"
     fi
 
-    # Carregar variaveis do .env
     load_env
 }
 
@@ -375,10 +387,7 @@ cmd_cleanup() {
     local name
     name="$(stack_name)"
 
-    log_warn "⚠️  ATENÇÃO: Este comando vai APAGAR TUDO:"
-    log_warn "   - Stack: $name"
-    log_warn "   - Volumes: portainer_data, traefik_letsencrypt"
-    log_warn "   - Arquivo .env"
+    log_warn "ATENÇÃO: Este comando vai remover a Stack: $name e os volumes da stack (prefixo: ${name}_)"
     
     local confirm
     confirm="$(ask_yes_no "Deseja continuar? (yes/no): " "no")"
@@ -391,21 +400,55 @@ cmd_cleanup() {
     if docker stack ls | grep -q "${name}"; then
         log_info "Removendo stack: $name"
         docker stack rm "$name" || true
-        sleep 3  # Aguardar remoção dos serviços
+        log_info "Aguardando remocao dos servicos da stack..."
+        local retries=0
+        while docker stack ls 2>/dev/null | grep -q "${name}" && [ $retries -lt 15 ]; do
+            sleep 2
+            retries=$((retries + 1))
+        done
     fi
 
-    # Remover volumes
-    log_info "Removendo volumes..."
-    docker volume rm "${name}_portainer_data" 2>/dev/null || log_warn "Volume portainer_data não encontrado"
-    docker volume rm "${name}_traefik_letsencrypt" 2>/dev/null || log_warn "Volume traefik_letsencrypt não encontrado"
-
-    # Remover arquivo .env
-    if [ -f "$ENV_FILE" ]; then
-        log_info "Removendo arquivo .env"
-        rm -f "$ENV_FILE"
+    # Aguardar todos os containers da stack serem finalizados
+    # (volumes so ficam livres quando os containers param de vez)
+    log_info "Aguardando todos os containers da stack finalizarem..."
+    local retries=0
+    while [ -n "$(docker ps -aq --filter "label=com.docker.stack.namespace=${name}" 2>/dev/null)" ] && [ $retries -lt 30 ]; do
+        sleep 2
+        retries=$((retries + 1))
+    done
+    if [ $retries -ge 30 ]; then
+        log_warn "Timeout aguardando containers. Tentando remover volumes mesmo assim..."
     fi
 
-    log_success "Cleanup completo! Execute 'init' para recomeçar do zero."
+    # Remover todos os volumes da stack dinamicamente (com retry)
+    log_info "Removendo volumes da stack ${name}..."
+    local volumes
+    volumes=$(docker volume ls --format '{{.Name}}' | grep "^${name}_" || true)
+    if [ -n "$volumes" ]; then
+        echo "$volumes" | while read -r vol; do
+            log_info "Removendo volume: $vol"
+            local vol_retries=0
+            local removed=false
+            while [ $vol_retries -lt 10 ]; do
+                if docker volume rm "$vol" 2>/dev/null; then
+                    log_success "Volume $vol removido"
+                    removed=true
+                    break
+                fi
+                vol_retries=$((vol_retries + 1))
+                log_info "Volume $vol ainda em uso, aguardando... ($vol_retries/10)"
+                sleep 3
+            done
+            if [ "$removed" = false ]; then
+                log_warn "Nao foi possivel remover o volume: $vol"
+            fi
+        done
+    else
+        log_info "Nenhum volume encontrado com prefixo '${name}_'"
+    fi
+
+
+    log_success "Cleanup completo! O arquivo .env foi preservado. Execute 'init' para recomecar."
 }
 
 cmd_help() {
@@ -418,7 +461,7 @@ Comandos:
   start       Inicia a stack swarm-infra
   stop        Para a stack swarm-infra
   restart     Reinicia a stack swarm-infra
-  cleanup     ⚠️  Remove TUDO (stack, volumes, .env) e recomeça do zero
+  cleanup     ⚠️ Remove a stack e todos os volumes (preserva o .env)
 EOF
 }
 
