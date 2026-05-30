@@ -131,73 +131,77 @@ ensure_swarm_active() {
 
 ensure_env_configured() {
     if [ ! -f "$ENV_FILE" ]; then
-        if [ -f "$ENV_EXAMPLE" ]; then
-            cp "$ENV_EXAMPLE" "$ENV_FILE"
-            log_info "Arquivo .env criado a partir de .env.example"
-        else
+        log_info "Arquivo .env nao encontrado. Iniciando configuracao..."
+
+        if [ ! -f "$ENV_EXAMPLE" ]; then
             log_error "Arquivo .env.example nao encontrado."
             exit 1
         fi
-    fi
 
-    load_env
-
-    if [ -z "${DOMAIN:-}" ]; then
-        read -r -p "Dominio base (ex: exemplo.com): " DOMAIN
-        set_env_var "DOMAIN" "${DOMAIN}"
-    fi
-
-    if [ -z "${LETSENCRYPT_EMAIL:-}" ]; then
-        read -r -p "Email para Let's Encrypt: " LETSENCRYPT_EMAIL
-        set_env_var "LETSENCRYPT_EMAIL" "${LETSENCRYPT_EMAIL}"
-    fi
-
-    if [ -z "${TRAEFIK_AUTH:-}" ]; then
-        local traefik_password traefik_hash
-        
-        while true; do
-            read -r -sp "Senha do Traefik: " traefik_password
-            echo ""
-            
-            if [ -z "${traefik_password}" ]; then
-                log_warn "Senha do Traefik nao pode estar vazia. Tente novamente (ou pressione Ctrl+C para cancelar)"
-                continue
-            fi
-            break
-        done
-        
+        # Validar htpasswd antes de solicitar senhas
         if ! command -v htpasswd >/dev/null 2>&1; then
-            log_error "htpasswd nao esta instalado. Execute: apt-get install apache2-utils"
+            log_error "O utilitario 'htpasswd' nao esta instalado."
+            log_error "Por favor, execute primeiro: ./swarm-infra.sh setup"
+            log_error "Ou instale manualmente: sudo apt-get install -y apache2-utils"
             exit 1
         fi
-        
-        traefik_hash=$(htpasswd -nbB admin "${traefik_password}" | sed 's/\$/\$\$/g')
-        set_env_var "TRAEFIK_AUTH" "'${traefik_hash}'"
-    fi
 
-    if [ -z "${PORTAINER_ADMIN_PASSWORD:-}" ]; then
-        local portainer_password portainer_hash
-        
-        while true; do
-            read -r -sp "Senha do Portainer: " portainer_password
-            echo ""
-            
-            if [ -z "${portainer_password}" ]; then
-                log_warn "Senha do Portainer nao pode estar vazia. Tente novamente (ou pressione Ctrl+C para cancelar)"
-                continue
+        local input_domain=""
+        local input_email=""
+        local traefik_password=""
+        local portainer_password=""
+
+        # 1. Solicitar DOMAIN
+        while [ -z "$input_domain" ]; do
+            read -r -p "Digite o Dominio base (ex: exemplo.com): " input_domain
+            if [ -z "$input_domain" ]; then
+                log_warn "O dominio nao pode ser vazio."
             fi
-            break
         done
-        
-        if ! command -v htpasswd >/dev/null 2>&1; then
-            log_error "htpasswd nao esta instalado. Execute: apt-get install apache2-utils"
-            exit 1
-        fi
-        
+
+        # 2. Solicitar LETSENCRYPT_EMAIL
+        while [ -z "$input_email" ]; do
+            read -r -p "Digite o Email para Let's Encrypt (ex: seu@email.com): " input_email
+            if [ -z "$input_email" ]; then
+                log_warn "O email nao pode ser vazio."
+            fi
+        done
+
+        # 3. Solicitar Senha do Traefik
+        while [ -z "$traefik_password" ]; do
+            read -r -p "Digite a senha para o Painel do Traefik (usuario: admin): " traefik_password
+            if [ -z "$traefik_password" ]; then
+                log_warn "A senha do Traefik nao pode ser vazia."
+            fi
+        done
+
+        # 4. Solicitar Senha do Portainer
+        while [ -z "$portainer_password" ]; do
+            read -r -p "Digite a senha para o Admin do Portainer (usuario: admin): " portainer_password
+            if [ -z "$portainer_password" ]; then
+                log_warn "A senha do Portainer nao pode ser vazia."
+            fi
+        done
+
+        # Copiar arquivo base
+        cp "$ENV_EXAMPLE" "$ENV_FILE"
+        log_info "Arquivo .env criado com sucesso!"
+
+        # Gerar hashes
+        local traefik_hash portainer_hash
+        traefik_hash=$(htpasswd -nb admin "${traefik_password}")
         portainer_hash=$(htpasswd -nbB admin "${portainer_password}" | cut -d ":" -f 2)
+
+        # Aplicar no .env
+        set_env_var "DOMAIN" "${input_domain}"
+        set_env_var "LETSENCRYPT_EMAIL" "${input_email}"
+        set_env_var "TRAEFIK_AUTH" "'${traefik_hash}'"
         set_env_var "PORTAINER_ADMIN_PASSWORD" "'${portainer_hash}'"
+
+        log_success "Arquivo .env configurado com sucesso!"
     fi
 
+    # Carregar variaveis do .env
     load_env
 }
 
@@ -283,8 +287,8 @@ EOF
 cmd_init() {
     require_linux
 
-    ensure_swarm_active
     ensure_env_configured
+    ensure_swarm_active
     ensure_dirs
     load_env
 
