@@ -73,9 +73,8 @@ Com a chave SSH devidamente configurada no GitHub, clone o repositório no seu s
 
 1.  **Clone o projeto na máquina servidora** (recomenda-se no diretório `/root` ou `/home/usuario`):
     ```bash
-    cd /root
-    git clone git@github.com:ricardocrescenti/swarm-infra.git
-    cd swarm-infra
+    git clone git@github.com:ricardocrescenti/swarm-infra.git /root/swarm-infra
+    cd /root/swarm-infra
     ```
 2.  **Conceda permissão de execução ao script CLI (`swarm-infra.sh`):**
     ```bash
@@ -133,27 +132,17 @@ sudo apt-get install -y apache2-utils
 
 ---
 
-### Passo 4: Configuração de Variáveis e Inicialização do Docker Swarm
+### Passo 4: Inicialização do Docker Swarm
 
-1.  **Crie e edite seu arquivo de configuração de variáveis (.env):**
-    ```bash
-    cp .env.example .env
-    nano .env
-    ```
-    Edite no arquivo `.env` as seguintes chaves fundamentais:
-    *   `DOMAIN`: Seu domínio base (ex: `exemplo.com`).
-    *   `LETSENCRYPT_EMAIL`: Seu e-mail administrativo para registro seguro dos certificados SSL do Let's Encrypt.
-
-2.  **Inicialize a infraestrutura básica do cluster:**
-    ```bash
-    ./swarm-infra.sh init
-    ```
-    > [!IMPORTANT]
-    > **O que o comando `init` realiza?**
-    > 1. Ativa o Docker Swarm no servidor (caso já não esteja ativado).
-    > 2. Valida o arquivo `.env` e pergunta interativamente pelas senhas do **Traefik** e do **Portainer** se não estiverem definidas, gerando os hashes de segurança criptográficos automaticamente.
-    > 3. Cria a rede overlay `traefik_public` de barramento compartilhado.
-    > 4. Efetua o deploy do Traefik e Portainer utilizando o `docker-compose.yml` integrado.
+```bash
+./swarm-infra.sh init
+```
+> [!IMPORTANT]
+> **O que o comando `init` realiza?**
+> 1. Ativa o Docker Swarm no servidor (caso já não esteja ativado).
+> 2. Valida o arquivo `.env` e pergunta interativamente o *dominio*, e-mail do LETS_CRYPT e as senhas do **Traefik** e do **Portainer** se não estiverem definidas, gerando os hashes de segurança criptográficos automaticamente.
+> 3. Cria a rede overlay `traefik_public` de barramento compartilhado.
+> 4. Efetua o deploy do Traefik e Portainer utilizando o `docker-compose.yml` integrado.
 
 ---
 
