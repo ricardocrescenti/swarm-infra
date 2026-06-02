@@ -140,7 +140,7 @@ sudo apt-get install -y apache2-utils
 > [!IMPORTANT]
 > **O que o comando `init` realiza?**
 > 1. Ativa o Docker Swarm no servidor (caso já não esteja ativado).
-> 2. Valida o arquivo `.env` e pergunta interativamente o *dominio*, e-mail do LETS_CRYPT e as senhas do **Traefik** e do **Portainer** se não estiverem definidas, gerando os hashes de segurança criptográficos automaticamente.
+> 2. Valida o arquivo `.env` e pergunta interativamente o **Dominio**, **E-Mail** do LETS_CRYPT e as senhas do **Traefik** e do **Portainer** se não estiverem definidas, gerando os hashes de segurança criptográficos automaticamente.
 > 3. Cria a rede overlay `traefik_public` de barramento compartilhado.
 > 4. Efetua o deploy do Traefik e Portainer utilizando o `docker-compose.yml` integrado.
 
