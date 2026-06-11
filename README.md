@@ -1,10 +1,10 @@
 # 🐳 Swarm Infrastructure - Infraestrutura Base Compartilhada
 
-[![Docker](https://img.shields.io/badge/Docker-Swarm-blue.svg?logo=docker&logoColor=white)](https://docs.docker.com/engine/swarm/)
+[![Docker](https://img.shields.io/badge/Docker-Swarm%20%7C%20Compose-blue.svg?logo=docker&logoColor=white)](https://docs.docker.com/)
 [![Traefik](https://img.shields.io/badge/Traefik-v2.10-red.svg?logo=traefik&logoColor=white)](https://doc.traefik.io/traefik/)
 [![Portainer](https://img.shields.io/badge/Portainer-Community-blue.svg?logo=portainer&logoColor=white)](https://docs.portainer.io/)
 
-**Projeto independente** para provisionar e gerenciar a infraestrutura base de um cluster Docker Swarm compartilhada de forma profissional, segura e escalável entre múltiplas aplicações.
+**Projeto independente** para provisionar e gerenciar a infraestrutura base compartilhada com Traefik + Portainer em dois modos: **Docker Swarm** ou **Docker Compose (single node)**.
 
 ---
 
@@ -12,7 +12,7 @@
 
 *   **Traefik**: Reverse proxy e load balancer de alta performance com geração de SSL automático e gratuito (**Let's Encrypt**).
 *   **Portainer**: Interface gráfica intuitiva para gerenciamento visual do cluster Swarm, stacks, serviços e volumes.
-*   **Rede Compartilhada Overlay**: Uma rede interna chamada `traefik_public` que interconecta de forma segura todas as suas aplicações ao Traefik.
+*   **Rede Compartilhada `traefik_public`**: Overlay no modo Swarm e Bridge no modo Single.
 *   **CLI de Automação (`swarm-infra.sh`)**: Script completo em Bash para facilitar o setup, inicialização, manutenção e limpeza de toda a sua infraestrutura.
 
 ---
@@ -132,17 +132,18 @@ sudo apt-get install -y apache2-utils
 
 ---
 
-### Passo 4: Inicialização do Docker Swarm
+### Passo 4: Inicialização da Infraestrutura (Swarm ou Single)
 
 ```bash
 ./swarm-infra.sh init
 ```
 > [!IMPORTANT]
 > **O que o comando `init` realiza?**
-> 1. Ativa o Docker Swarm no servidor (caso já não esteja ativado).
-> 2. Valida o arquivo `.env` e pergunta interativamente o **Dominio**, **E-Mail** do LETS_CRYPT e as senhas do **Traefik** e do **Portainer** se não estiverem definidas, gerando os hashes de segurança criptográficos automaticamente.
-> 3. Cria a rede overlay `traefik_public` de barramento compartilhado.
-> 4. Efetua o deploy do Traefik e Portainer utilizando o `docker-compose.yml` integrado.
+> 1. Exibe um menu numerado para escolher o modo de deploy: `swarm` ou `single`.
+> 2. Se `.env` não existir, cria a partir de `.env.example` e solicita apenas `DOMAIN` e `LETSENCRYPT_EMAIL`.
+> 3. Gera automaticamente as senhas do Traefik e Portainer e grava apenas os hashes no `.env`.
+> 4. No modo `swarm`, inicializa o Swarm (se necessário), cria/valida a rede overlay `traefik_public` e faz deploy com `docker-compose.swarm.yml`.
+> 5. No modo `single`, faz deploy com `docker compose` usando `docker-compose.single.yml`.
 
 ---
 
@@ -150,24 +151,27 @@ sudo apt-get install -y apache2-utils
 
 Após rodar o comando `init`, aguarde cerca de 1 a 2 minutos para que os certificados SSL seguros sejam gerados e validados automaticamente. Em seguida, abra o navegador e acesse:
 
-*   📊 **Traefik Dashboard**: `https://traefik.seu-dominio.com` *(efetue login com o usuário `admin` e a senha gerada interativamente no init)*
-*   🐳 **Portainer UI**: `https://portainer.seu-dominio.com` *(cadastre sua senha de administrador master no primeiro acesso)*
+*   📊 **Traefik Dashboard**: `https://traefik.seu-dominio.com` *(login: `admin` + senha exibida no `init`)*
+*   🐳 **Portainer UI**: `https://portainer.seu-dominio.com` *(login: `admin` + senha exibida no `init`, apenas na primeira inicialização com volume novo)*
+
+> [!NOTE]
+> No Portainer, o parâmetro `--admin-password` só é aplicado na criação inicial do usuário admin. Se o volume `portainer_data` já existir, a senha anterior é mantida.
 
 ---
 
 ## 🛠️ Comando da CLI de Automação (`swarm-infra.sh`)
 
-O arquivo [swarm-infra.sh](file:///d:/Projetos/CrescentiApps/swarm-infra/swarm-infra.sh) é o seu painel de controle via terminal.
+O arquivo `swarm-infra.sh` é o seu painel de controle via terminal.
 
 | Comando | Descrição |
 | :--- | :--- |
 | `chmod +x swarm-infra.sh` | Concede permissão de execução ao script. |
 | `./swarm-infra.sh setup` | Instala automaticamente o Docker, Compose e apache2-utils no servidor atual. |
-| `./swarm-infra.sh init` | Ativa o Swarm, cria as redes overlay, gera as credenciais e executa o primeiro deploy. |
-| `./swarm-infra.sh start` | Inicializa/re-implanta a stack de infraestrutura. Útil para aplicar alterações de compose. |
-| `./swarm-infra.sh stop` | Pausa e remove os containers da stack `swarm-infra` sem apagar os volumes de dados. |
-| `./swarm-infra.sh restart` | Executa um stop seguido de um start na stack com confirmação manual. |
-| `./swarm-infra.sh cleanup` | ⚠️ **Ação Destrutiva**: Para a stack, remove os volumes persistentes e apaga o `.env`. |
+| `./swarm-infra.sh init` | Pergunta o modo (`swarm`/`single`), configura `.env` e executa o primeiro deploy no modo escolhido. |
+| `./swarm-infra.sh start` | Inicializa/reaplica no modo salvo em `DEPLOY_MODE` no `.env`. |
+| `./swarm-infra.sh stop` | Para a stack/serviços no modo salvo em `DEPLOY_MODE`. |
+| `./swarm-infra.sh restart` | Reinicia a stack/serviços no modo salvo em `DEPLOY_MODE`. |
+| `./swarm-infra.sh cleanup` | ⚠️ **Ação Destrutiva**: remove stack/serviços e volumes, preservando o `.env`. |
 
 ---
 

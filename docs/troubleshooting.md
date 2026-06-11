@@ -259,6 +259,66 @@ docker service inspect swarm-infra_portainer --format='{{json .Spec.TaskTemplate
 # Verificar permissões do volume
 docker volume inspect swarm-infra_traefik_letsencrypt
 
+### 10. Senha do Portainer nao funciona apos recriar .env
+
+**Sintomas:**
+- Senha nova exibida no `init` nao autentica no Portainer
+- Traefik funciona com a senha nova, mas Portainer nao
+
+**Causa:**
+- O Portainer aplica `--admin-password` apenas na criacao inicial do usuario admin
+- Se o volume de dados do Portainer ja existe, a senha antiga e mantida
+
+**Solucoes (Swarm):**
+```bash
+# 1) Escalar Portainer para 0
+docker service scale swarm-infra_portainer=0
+
+# 2) Resetar senha via helper oficial
+docker pull portainer/helper-reset-password
+docker run --rm -v swarm-infra_portainer_data:/data portainer/helper-reset-password
+
+# 3) Escalar Portainer novamente
+docker service scale swarm-infra_portainer=1
+```
+
+**Solucoes (Single/Compose):**
+```bash
+# 1) Parar apenas o portainer
+docker compose -p swarm-infra -f docker-compose.single.yml stop portainer
+
+# 2) Resetar senha via helper oficial
+docker pull portainer/helper-reset-password
+docker run --rm -v swarm-infra_portainer_data:/data portainer/helper-reset-password
+
+# 3) Subir novamente
+docker compose -p swarm-infra -f docker-compose.single.yml up -d portainer
+```
+
+### 11. Erro no init: "/root/swarm-infra/.env: line XX: single: command not found"
+
+**Sintoma:**
+- Durante o `init`, ao carregar o `.env`, aparece erro tentando executar `single` como comando
+
+**Causa:**
+- Linha `DEPLOY_MODE` quebrada em duas linhas no `.env`
+- Exemplo invalido:
+```env
+DEPLOY_MODE=
+single
+```
+
+**Formato correto:**
+```env
+DEPLOY_MODE=single
+```
+
+**Correcao rapida:**
+```bash
+sed -i '/^DEPLOY_MODE=/d;/^single$/d;/^swarm$/d' .env
+echo 'DEPLOY_MODE=single' >> .env
+```
+
 # Se necessário, recriar com permissões corretas
 docker service scale swarm-infra_traefik=0
 docker volume rm swarm-infra_traefik_letsencrypt
