@@ -68,11 +68,39 @@ ask_yes_no() {
     done
 }
 
+ask_yes_no_menu() {
+    local prompt="$1"
+    local default="$2"
+    local options=("yes" "no")
+    local PS3="Escolha uma opcao [1-2]: "
+    local choice
+
+    echo "" >&2
+    echo "$prompt" >&2
+    select choice in "${options[@]}"; do
+        case "$REPLY" in
+            1) echo "yes"; return 0 ;;
+            2) echo "no"; return 0 ;;
+            "")
+                if [ "$default" = "yes" ] || [ "$default" = "no" ]; then
+                    echo "$default"
+                    return 0
+                fi
+                echo "[WARN] Opcao invalida. Digite 1 ou 2." >&2
+                ;;
+            *) echo "[WARN] Opcao invalida. Digite 1 ou 2." >&2 ;;
+        esac
+    done
+}
+
 
 
 set_env_var() {
     local key="$1"
     local value="$2"
+
+    # Evita quebrar o arquivo .env com novas linhas acidentais
+    value="$(printf '%s' "$value" | tr -d '\r\n')"
 
     if [ -f "$ENV_FILE" ] && grep -q "^${key}=" "$ENV_FILE"; then
         sed -i "s|^${key}=.*|${key}=${value}|g" "$ENV_FILE"
@@ -164,21 +192,14 @@ configure_env_interactive() {
         fi
     done
 
-    # 3. Solicitar Senha do Traefik
-    while [ -z "$traefik_password" ]; do
-        read -r -p "Digite a senha para o Painel do Traefik (usuario: admin): " traefik_password
-        if [ -z "$traefik_password" ]; then
-            log_warn "A senha do Traefik nao pode ser vazia."
-        fi
-    done
-
-    # 4. Solicitar Senha do Portainer
-    while [ -z "$portainer_password" ]; do
-        read -r -p "Digite a senha para o Admin do Portainer (usuario: admin): " portainer_password
-        if [ -z "$portainer_password" ]; then
-            log_warn "A senha do Portainer nao pode ser vazia."
-        fi
-    done
+    # 3. Gerar senhas automaticamente
+    if command -v openssl >/dev/null 2>&1; then
+        traefik_password=$(openssl rand -base64 24 | tr -d '\n')
+        portainer_password=$(openssl rand -base64 24 | tr -d '\n')
+    else
+        traefik_password=$(tr -dc 'A-Za-z0-9!@#%^*()_+=-' < /dev/urandom | head -c 24)
+        portainer_password=$(tr -dc 'A-Za-z0-9!@#%^*()_+=-' < /dev/urandom | head -c 24)
+    fi
 
     # Copiar arquivo base
     cp "$ENV_EXAMPLE" "$ENV_FILE"
@@ -196,6 +217,15 @@ configure_env_interactive() {
     set_env_var "PORTAINER_ADMIN_PASSWORD" "'${portainer_hash}'"
 
     log_success "Arquivo .env configurado com sucesso!"
+    echo ""
+    log_info "Credenciais geradas automaticamente:"
+    log_info "  Traefik Dashboard"
+    log_info "    Usuario: admin"
+    log_info "    Senha:   ${traefik_password}"
+    log_info "  Portainer"
+    log_info "    Usuario: admin"
+    log_info "    Senha:   ${portainer_password}"
+    log_warn "Guarde essas senhas em local seguro. Elas aparecem apenas neste momento."
 }
 
 ensure_env_configured() {
@@ -204,7 +234,7 @@ ensure_env_configured() {
         configure_env_interactive
     else
         local recreate
-        recreate="$(ask_yes_no "Arquivo .env ja existe. Deseja recriar? (yes/no): " "no")"
+        recreate="$(ask_yes_no_menu "Arquivo .env ja existe. Deseja recriar?" "no")"
         if [ "$recreate" = "yes" ]; then
             log_info "Recriando arquivo .env..."
             rm -f "$ENV_FILE"
@@ -220,6 +250,36 @@ ensure_env_configured() {
 stack_name() {
     load_env
     echo "${STACK_NAME:-$STACK_NAME_DEFAULT}"
+}
+
+get_deploy_mode() {
+    load_env
+    echo "${DEPLOY_MODE:-swarm}"
+}
+
+get_compose_file() {
+    local mode
+    mode="$(get_deploy_mode)"
+    if [ "$mode" = "single" ]; then
+        echo "docker-compose.single.yml"
+    else
+        echo "docker-compose.swarm.yml"
+    fi
+}
+
+ask_deploy_mode() {
+    local options=("swarm  - Docker Swarm (multi-node, overlay network)" "single - Docker Compose padrao (single-node, bridge network)")
+    local PS3="Escolha o modo de deploy [1-2]: "
+    local choice
+
+    echo "" >&2
+    select choice in "${options[@]}"; do
+        case "$REPLY" in
+            1) echo "swarm";  return 0 ;;
+            2) echo "single"; return 0 ;;
+            *) echo "[WARN] Opcao invalida. Digite 1 ou 2." >&2 ;;
+        esac
+    done
 }
 
 # -----------------------------------------------------------------------------
@@ -299,32 +359,43 @@ EOF
 cmd_init() {
     require_linux
 
+    # Perguntar e salvar modo de deploy
+    local mode
+    mode="$(ask_deploy_mode)"
+
     ensure_env_configured
-    ensure_swarm_active
     ensure_dirs
+    load_env
+
+    set_env_var "DEPLOY_MODE" "$mode"
     load_env
 
     local name
     name="$(stack_name)"
 
-    log_info "Verificando rede traefik_public..."
-    if ! docker network ls | grep -q "traefik_public"; then
-        docker network create --driver overlay --attachable traefik_public
-        log_success "Rede criada"
+    if [ "$mode" = "swarm" ]; then
+        ensure_swarm_active
+
+        log_info "Verificando rede traefik_public..."
+        if ! docker network ls | grep -q "traefik_public"; then
+            docker network create --driver overlay --attachable traefik_public
+            log_success "Rede criada"
+        else
+            log_info "Rede traefik_public ja existe"
+        fi
+
+        log_info "Fazendo deploy da stack: $name"
+        docker stack deploy -c docker-compose.swarm.yml --with-registry-auth "$name"
+        log_success "Stack Swarm inicializada"
     else
-        log_info "Rede traefik_public ja existe"
+        log_info "Iniciando servicos (modo single): $name"
+        docker compose -p "$name" -f docker-compose.single.yml up -d
+        log_success "Servicos inicializados (modo single)"
     fi
-
-    log_info "Fazendo deploy da stack: $name"
-    docker stack deploy -c docker-compose.yml --with-registry-auth "$name"
-
-    log_success "Stack inicializada"
 }
 
 cmd_start() {
     require_linux
-
-    ensure_swarm_active
 
     if [ ! -f "$ENV_FILE" ]; then
         log_error "Arquivo .env nao encontrado. Execute: ./swarm-infra.sh init"
@@ -334,58 +405,96 @@ cmd_start() {
     ensure_dirs
     load_env
 
-    local name
+    local name mode
     name="$(stack_name)"
+    mode="$(get_deploy_mode)"
 
-    log_info "Iniciando stack: $name"
-    docker stack deploy -c docker-compose.yml --with-registry-auth "$name"
-    log_success "Stack iniciada"
+    if [ "$mode" = "swarm" ]; then
+        ensure_swarm_active
+        log_info "Iniciando stack (swarm): $name"
+        docker stack deploy -c docker-compose.swarm.yml --with-registry-auth "$name"
+        log_success "Stack iniciada"
+    else
+        log_info "Iniciando servicos (single): $name"
+        docker compose -p "$name" -f docker-compose.single.yml up -d
+        log_success "Servicos iniciados"
+    fi
 }
 
 cmd_stop() {
     require_linux
 
-    local name
+    local name mode
     name="$(stack_name)"
+    mode="$(get_deploy_mode)"
 
-    if ! docker stack ls | grep -q "${name}"; then
-        log_warn "Stack $name nao encontrada"
-        return 0
-    fi
-
-    if [ "${1:-}" != "--force" ]; then
-        local confirm
-        confirm="$(ask_yes_no "Confirma parar a stack $name? (yes/no): " "no")"
-        if [ "$confirm" != "yes" ]; then
-            log_info "Operacao cancelada"
+    if [ "$mode" = "swarm" ]; then
+        if ! docker stack ls | grep -q "${name}"; then
+            log_warn "Stack $name nao encontrada"
             return 0
         fi
-    fi
 
-    log_info "Parando stack $name..."
-    docker stack rm "$name"
-    log_success "Stack parada"
+        if [ "${1:-}" != "--force" ]; then
+            local confirm
+            confirm="$(ask_yes_no "Confirma parar a stack $name? (yes/no): " "no")"
+            if [ "$confirm" != "yes" ]; then
+                log_info "Operacao cancelada"
+                return 0
+            fi
+        fi
+
+        log_info "Parando stack (swarm): $name..."
+        docker stack rm "$name"
+        log_success "Stack parada"
+    else
+        if [ "${1:-}" != "--force" ]; then
+            local confirm
+            confirm="$(ask_yes_no "Confirma parar os servicos $name? (yes/no): " "no")"
+            if [ "$confirm" != "yes" ]; then
+                log_info "Operacao cancelada"
+                return 0
+            fi
+        fi
+
+        log_info "Parando servicos (single): $name..."
+        docker compose -p "$name" -f docker-compose.single.yml down
+        log_success "Servicos parados"
+    fi
 }
 
 cmd_restart() {
     require_linux
 
     local confirm
-    confirm="$(ask_yes_no "Confirma reiniciar a stack? (yes/no): " "no")"
+    confirm="$(ask_yes_no "Confirma reiniciar? (yes/no): " "no")"
     if [ "$confirm" != "yes" ]; then
         log_info "Operacao cancelada"
         return 0
     fi
 
-    cmd_stop --force
-    cmd_start
+    local mode
+    mode="$(get_deploy_mode)"
+
+    if [ "$mode" = "swarm" ]; then
+        cmd_stop --force
+        cmd_start
+    else
+        local name
+        name="$(stack_name)"
+        load_env
+        log_info "Reiniciando servicos (single): $name..."
+        docker compose -p "$name" -f docker-compose.single.yml down
+        docker compose -p "$name" -f docker-compose.single.yml up -d
+        log_success "Servicos reiniciados"
+    fi
 }
 
 cmd_cleanup() {
     require_linux
 
-    local name
+    local name mode
     name="$(stack_name)"
+    mode="$(get_deploy_mode)"
 
     log_warn "ATENÇÃO: Este comando vai remover a Stack: $name e os volumes da stack (prefixo: ${name}_)"
     
@@ -396,57 +505,61 @@ cmd_cleanup() {
         return 0
     fi
 
-    # Parar a stack
-    if docker stack ls | grep -q "${name}"; then
-        log_info "Removendo stack: $name"
-        docker stack rm "$name" || true
-        log_info "Aguardando remocao dos servicos da stack..."
+    if [ "$mode" = "swarm" ]; then
+        # Parar a stack swarm
+        if docker stack ls | grep -q "${name}"; then
+            log_info "Removendo stack: $name"
+            docker stack rm "$name" || true
+            log_info "Aguardando remocao dos servicos da stack..."
+            local retries=0
+            while docker stack ls 2>/dev/null | grep -q "${name}" && [ $retries -lt 15 ]; do
+                sleep 2
+                retries=$((retries + 1))
+            done
+        fi
+
+        # Aguardar todos os containers da stack serem finalizados
+        log_info "Aguardando todos os containers da stack finalizarem..."
         local retries=0
-        while docker stack ls 2>/dev/null | grep -q "${name}" && [ $retries -lt 15 ]; do
+        while [ -n "$(docker ps -aq --filter "label=com.docker.stack.namespace=${name}" 2>/dev/null)" ] && [ $retries -lt 30 ]; do
             sleep 2
             retries=$((retries + 1))
         done
-    fi
+        if [ $retries -ge 30 ]; then
+            log_warn "Timeout aguardando containers. Tentando remover volumes mesmo assim..."
+        fi
 
-    # Aguardar todos os containers da stack serem finalizados
-    # (volumes so ficam livres quando os containers param de vez)
-    log_info "Aguardando todos os containers da stack finalizarem..."
-    local retries=0
-    while [ -n "$(docker ps -aq --filter "label=com.docker.stack.namespace=${name}" 2>/dev/null)" ] && [ $retries -lt 30 ]; do
-        sleep 2
-        retries=$((retries + 1))
-    done
-    if [ $retries -ge 30 ]; then
-        log_warn "Timeout aguardando containers. Tentando remover volumes mesmo assim..."
-    fi
-
-    # Remover todos os volumes da stack dinamicamente (com retry)
-    log_info "Removendo volumes da stack ${name}..."
-    local volumes
-    volumes=$(docker volume ls --format '{{.Name}}' | grep "^${name}_" || true)
-    if [ -n "$volumes" ]; then
-        echo "$volumes" | while read -r vol; do
-            log_info "Removendo volume: $vol"
-            local vol_retries=0
-            local removed=false
-            while [ $vol_retries -lt 10 ]; do
-                if docker volume rm "$vol" 2>/dev/null; then
-                    log_success "Volume $vol removido"
-                    removed=true
-                    break
+        # Remover todos os volumes da stack dinamicamente (com retry)
+        log_info "Removendo volumes da stack ${name}..."
+        local volumes
+        volumes=$(docker volume ls --format '{{.Name}}' | grep "^${name}_" || true)
+        if [ -n "$volumes" ]; then
+            echo "$volumes" | while read -r vol; do
+                log_info "Removendo volume: $vol"
+                local vol_retries=0
+                local removed=false
+                while [ $vol_retries -lt 10 ]; do
+                    if docker volume rm "$vol" 2>/dev/null; then
+                        log_success "Volume $vol removido"
+                        removed=true
+                        break
+                    fi
+                    vol_retries=$((vol_retries + 1))
+                    log_info "Volume $vol ainda em uso, aguardando... ($vol_retries/10)"
+                    sleep 3
+                done
+                if [ "$removed" = false ]; then
+                    log_warn "Nao foi possivel remover o volume: $vol"
                 fi
-                vol_retries=$((vol_retries + 1))
-                log_info "Volume $vol ainda em uso, aguardando... ($vol_retries/10)"
-                sleep 3
             done
-            if [ "$removed" = false ]; then
-                log_warn "Nao foi possivel remover o volume: $vol"
-            fi
-        done
+        else
+            log_info "Nenhum volume encontrado com prefixo '${name}_'"
+        fi
     else
-        log_info "Nenhum volume encontrado com prefixo '${name}_'"
+        log_info "Removendo servicos e volumes (single): $name..."
+        docker compose -p "$name" -f docker-compose.single.yml down -v
+        log_success "Servicos e volumes removidos"
     fi
-
 
     log_success "Cleanup completo! O arquivo .env foi preservado. Execute 'init' para recomecar."
 }
@@ -457,11 +570,15 @@ Uso: ./swarm-infra.sh <comando>
 
 Comandos:
   setup       Instala o Docker, Docker Compose e dependencias (apache2-utils) no servidor atual
-  init        Inicializa Traefik + Portainer (primeira vez)
-  start       Inicia a stack swarm-infra
-  stop        Para a stack swarm-infra
-  restart     Reinicia a stack swarm-infra
-  cleanup     ⚠️ Remove a stack e todos os volumes (preserva o .env)
+  init        Inicializa Traefik + Portainer (primeira vez); pergunta o modo: swarm ou single
+  start       Inicia a stack/servicos (usa o modo salvo no .env)
+  stop        Para a stack/servicos
+  restart     Reinicia a stack/servicos
+  cleanup     ⚠️ Remove a stack/servicos e todos os volumes (preserva o .env)
+
+Modos de deploy (escolhido no 'init', salvo em DEPLOY_MODE no .env):
+  swarm       Docker Swarm (multi-node, overlay network) - usa docker-compose.swarm.yml
+  single      Docker Compose padrao (single-node, bridge network) - usa docker-compose.single.yml
 EOF
 }
 

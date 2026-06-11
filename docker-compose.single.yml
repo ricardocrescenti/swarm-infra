@@ -1,0 +1,110 @@
+# =============================================================================
+# Swarm Infrastructure - Stack Base Compartilhada (Modo Single / Docker Compose)
+# =============================================================================
+# Deploy: ./swarm-infra.sh init  (escolher modo "single")
+# Start:  ./swarm-infra.sh start
+# Stop:   ./swarm-infra.sh stop
+# =============================================================================
+
+# =============================================================================
+# Networks - Bridge local (modo single, sem Swarm)
+# =============================================================================
+networks:
+  traefik_public:
+    driver: bridge
+
+# =============================================================================
+# Volumes
+# =============================================================================
+volumes:
+  traefik_letsencrypt:
+    driver: local
+
+  portainer_data:
+    driver: local
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  # Traefik - Reverse Proxy e Load Balancer
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v2.11
+    restart: unless-stopped
+    command:
+      - --api.dashboard=true
+      - --api.insecure=false
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=traefik_public
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.letsencrypt.acme.email=${LETSENCRYPT_EMAIL}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web
+      - --log.level=INFO
+      - --accesslog=true
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - traefik_public
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)
+      - traefik.http.routers.traefik.service=api@internal
+      - traefik.http.routers.traefik.entrypoints=websecure
+      - traefik.http.routers.traefik.tls.certresolver=letsencrypt
+      - traefik.http.services.traefik.loadbalancer.server.port=8080
+      - traefik.http.routers.traefik.middlewares=auth
+      - traefik.http.middlewares.auth.basicauth.users=${TRAEFIK_AUTH}
+
+  # ---------------------------------------------------------------------------
+  # Portainer - Interface Web para Docker
+  # ---------------------------------------------------------------------------
+  portainer:
+    image: portainer/portainer-ce:2.38.1
+    restart: unless-stopped
+    command:
+      - --admin-password=${PORTAINER_ADMIN_PASSWORD}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    networks:
+      - traefik_public
+    labels:
+      # Habilitar Traefik
+      - traefik.enable=true
+
+      # Router HTTP → HTTPS
+      - traefik.http.routers.portainer-http.rule=Host(`portainer.${DOMAIN}`)
+      - traefik.http.routers.portainer-http.entrypoints=web
+      - traefik.http.routers.portainer-http.middlewares=portainer-https-redirect
+
+      # Middleware de redirecionamento
+      - traefik.http.middlewares.portainer-https-redirect.redirectscheme.scheme=https
+      - traefik.http.middlewares.portainer-https-redirect.redirectscheme.permanent=true
+
+      # Router HTTPS
+      - traefik.http.routers.portainer-https.rule=Host(`portainer.${DOMAIN}`)
+      - traefik.http.routers.portainer-https.entrypoints=websecure
+      - traefik.http.routers.portainer-https.tls=true
+      - traefik.http.routers.portainer-https.tls.certresolver=letsencrypt
+      - traefik.http.routers.portainer-https.service=portainer
+
+      # Service
+      - traefik.http.services.portainer.loadbalancer.server.port=9000
+
+      # Headers de segurança
+      - traefik.http.routers.portainer-https.middlewares=portainer-headers
+      - traefik.http.middlewares.portainer-headers.headers.sslredirect=true
+      - traefik.http.middlewares.portainer-headers.headers.stsSeconds=31536000
+      - traefik.http.middlewares.portainer-headers.headers.stsIncludeSubdomains=true
+      - traefik.http.middlewares.portainer-headers.headers.stsPreload=true
